@@ -1,0 +1,107 @@
+pipeline {
+    agent {
+        label 'builtinNode'
+    }
+
+    environment {
+        // Docker Hub credentials (stored in Jenkins credentials)
+        DOCKER_HUB_CREDENTIALS = credentials('docker-hub-credentials')
+        DOCKER_IMAGE_NAME = 'adhikarygaurav99/techaxis-webapp' // Replace with your Docker Hub image name
+        DOCKER_IMAGE_TAG = 'latest' // Docker image tag
+    }
+
+    stages {
+        stage('Build Application') {
+            steps {
+                sh 'mvn -f jenkins/java-tomcat-sample/pom.xml clean package'
+            }
+            post {
+                success {
+                    echo "Now Archiving the Artifacts...."
+                    archiveArtifacts artifacts: '**/*.war'
+                }
+            }
+        }
+
+        stage('Create Tomcat Image') {
+            agent {
+                label 'testnode'
+            }
+            steps {
+                copyArtifacts filter: '**/*.war', fingerprintArtifacts: true, projectName: env.JOB_NAME, selector: specific(env.BUILD_NUMBER)
+                echo "Building Docker image"
+                sh '''
+                original_pwd=$(pwd -P)
+                cd jenkins/java-tomcat-sample
+                docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} .
+                cd $original_pwd
+                '''
+            }
+        }
+
+        stage('Push Docker Image to Docker Hub') {
+            steps {
+                echo "Logging in to Docker Hub"
+                sh "echo ${DOCKER_HUB_CREDENTIALS_PSW} | docker login -u ${DOCKER_HUB_CREDENTIALS_USR} --password-stdin"
+
+                echo "Pushing Docker image to Docker Hub"
+                sh "docker push ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}"
+            }
+        }
+
+        stage('Deploy to Staging Environment') {
+            agent {
+                label 'testnode'
+            }
+            steps {
+                echo "Running app on staging env"
+                sh '''
+                docker stop tomcatInstanceStaging || true
+                docker rm tomcatInstanceStaging || true
+                docker run -itd --name tomcatInstanceStaging -p 8082:8080 ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+                '''
+            }
+        }
+
+        stage('Deploy to Production Environment') {
+            agent {
+                label 'testnode'
+            }
+            steps {
+                timeout(time: 1, unit: 'DAYS') {
+                    input message: 'Approve PRODUCTION Deployment?'
+                }
+                echo "Running app on Prod env"
+                sh '''
+                docker stop tomcatInstanceProd || true
+                docker rm tomcatInstanceProd || true
+                docker run -itd --name tomcatInstanceProd -p 8083:8080 ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+                '''
+            }
+        }
+    }
+
+    post { 
+        always { 
+            mail to: 'adhikarygaurav99@gmail.com',
+            subject: "Job '${JOB_NAME}' (${BUILD_NUMBER}) is waiting for input",
+            body: "Please go to ${BUILD_URL} and verify the build"
+        }
+        success {
+            mail to: 'adhikarygaurav99@gmail.com', 
+            body: """Hi Team,
+
+Build #$BUILD_NUMBER is successful. Please review the build at ${BUILD_URL}.
+
+Regards,
+DevOps Team
+""", 
+            subject: "Build Success: ${JOB_NAME} (${BUILD_NUMBER})"
+        }
+        failure {
+            mail to: 'adhikarygaurav99@gmail.com',
+            subject: "Build Failed: ${JOB_NAME} (${BUILD_NUMBER})",
+            body: "The build failed. Please check the logs at ${BUILD_URL}."
+        }
+    }
+}
